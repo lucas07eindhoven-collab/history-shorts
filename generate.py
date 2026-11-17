@@ -32,7 +32,7 @@ TOPICS = ROOT / "topics.txt"
 LANG = os.getenv("SHORTS_LANG", "nl")  # "nl" or "en"
 VOICES = {"nl": "nl-NL-MaartenNeural", "en": "en-US-GuyNeural"}
 VOICE = os.getenv("SHORTS_VOICE", VOICES.get(LANG, "en-US-GuyNeural"))
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 W, H, FPS = 1080, 1920, 30
@@ -122,21 +122,56 @@ def parse_json(text):
 
 
 # ---------------------------------------------------------------- LLM
+_MODELS = None
+
+
+def gemini_models(base, hdr):
+    """Model names change over time -> ask the API which Flash models exist and try newest first."""
+    global _MODELS
+    if _MODELS is not None:
+        return _MODELS
+    names = []
+    try:
+        r = requests.get(f"{base}/models?pageSize=200", headers=hdr, timeout=30)
+        r.raise_for_status()
+        for m in r.json().get("models", []):
+            n = m["name"].split("/")[-1]
+            if "generateContent" in m.get("supportedGenerationMethods", []) and "flash" in n \
+                    and not any(x in n for x in ("image", "tts", "audio", "live", "embed", "thinking")):
+                names.append(n)
+    except Exception as e:
+        log(f"Model list failed: {str(e)[:150]}")
+
+    def rank(n):  # newest version first, stable before preview, full before lite
+        ver = [int(x) for x in re.findall(r"(\d+)\.(\d+)", n)[0]] if re.search(r"\d+\.\d+", n) else [0, 0]
+        return (-ver[0], -ver[1], "preview" in n or "exp" in n, "lite" in n, len(n))
+    names.sort(key=rank)
+    _MODELS = [GEMINI_MODEL] + [n for n in names if n != GEMINI_MODEL]
+    if "gemini-flash-latest" not in _MODELS:
+        _MODELS.append("gemini-flash-latest")
+    log(f"Gemini candidates: {_MODELS[:5]}")
+    return _MODELS
+
+
 def ask_llm(prompt):
     gkey, qkey = os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY")
     errors = []
     if gkey:
-        try:
-            url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-                   f"{GEMINI_MODEL}:generateContent?key={gkey}")
-            r = requests.post(url, timeout=90, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.9},
-            })
-            r.raise_for_status()
-            return parse_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
-        except Exception as e:  # fall through to Groq
-            errors.append(f"Gemini: {e}")
+        base = "https://generativelanguage.googleapis.com/v1beta"
+        hdr = {"x-goog-api-key": gkey}  # header, so the key never shows up in logs/URLs
+        body = {"contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.9}}
+        for model in gemini_models(base, hdr):
+            try:
+                r = requests.post(f"{base}/models/{model}:generateContent", headers=hdr, json=body, timeout=120)
+                if r.status_code in (404, 429, 503):
+                    errors.append(f"Gemini {model}: HTTP {r.status_code}")
+                    continue
+                r.raise_for_status()
+                log(f"LLM: {model}")
+                return parse_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+            except Exception as e:
+                errors.append(f"Gemini {model}: {str(e)[:200]}")
     if qkey:
         try:
             r = requests.post("https://api.groq.com/openai/v1/chat/completions", timeout=90,
