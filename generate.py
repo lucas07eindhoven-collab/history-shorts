@@ -331,10 +331,9 @@ def img_gemini(prompt, path):
             try:
                 r = requests.post(f"{GEMINI_BASE}/models/{model}:generateContent", headers=hdr, json=body, timeout=120)
                 if r.status_code == 429:
-                    msg = r.text[:300]
-                    if "limit: 0" in msg or "free_tier" in msg and "limit: 0" in msg:
-                        log(f"Gemini image {model}: no free quota"); _IMG_DEAD.add(model); break
-                    log(f"Gemini image {model}: 429, waiting"); time.sleep(20 * (attempt + 1)); continue
+                    if "limit: 0" in r.text or attempt >= 1:
+                        log(f"Gemini image {model}: no free quota, skipping"); _IMG_DEAD.add(model); break
+                    log(f"Gemini image {model}: 429, waiting"); time.sleep(15); continue
                 if r.status_code in (400, 403, 404):
                     log(f"Gemini image {model}: HTTP {r.status_code} {r.text[:160]}"); _IMG_DEAD.add(model); break
                 r.raise_for_status()
@@ -395,8 +394,8 @@ def make_image(prompt, path, seed, offline):
     if offline:
         return placeholder_image(prompt, path, seed)
     full = f"{prompt}. Style: {STYLE}"
-    for name, fn in (("gemini", lambda: img_gemini(full, path)),
-                     ("cloudflare", lambda: img_cloudflare(full, path)),
+    for name, fn in (("cloudflare", lambda: img_cloudflare(full, path)),
+                     ("gemini", lambda: img_gemini(full, path)),
                      ("pollinations", lambda: img_pollinations(full, path, seed))):
         if fn():
             log(f"Image via {name}")
