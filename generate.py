@@ -163,12 +163,14 @@ def ask_llm(prompt):
                 "generationConfig": {"responseMimeType": "application/json", "temperature": 0.9}}
         for model in gemini_models(base, hdr):
             try:
-                r = requests.post(f"{base}/models/{model}:generateContent", headers=hdr, json=body, timeout=120)
+                r = requests.post(f"{base}/models/{model}:generateContent", headers=hdr, json=body, timeout=75)
                 if r.status_code in (404, 429, 503):
                     errors.append(f"Gemini {model}: HTTP {r.status_code}")
+                    log(f"Gemini {model}: HTTP {r.status_code}, next")
                     continue
                 r.raise_for_status()
                 log(f"LLM: {model}")
+                _MODELS.remove(model); _MODELS.insert(0, model)  # reuse the one that works
                 return parse_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
             except Exception as e:
                 errors.append(f"Gemini {model}: {str(e)[:200]}")
@@ -283,24 +285,123 @@ def placeholder_image(text, path, seed):
     img.save(path)
 
 
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+_IMG_MODELS = None
+_IMG_DEAD = set()  # providers that failed hard this run -> skip
+
+
+def _save_img(data, path):
+    path.write_bytes(data)
+    Image.open(path).convert("RGB").resize((IMG, IMG)).save(path)
+
+
+def gemini_image_models(hdr):
+    global _IMG_MODELS
+    if _IMG_MODELS is not None:
+        return _IMG_MODELS
+    names = []
+    try:
+        r = requests.get(f"{GEMINI_BASE}/models?pageSize=200", headers=hdr, timeout=30)
+        r.raise_for_status()
+        for m in r.json().get("models", []):
+            n = m["name"].split("/")[-1]
+            if "image" in n and "generateContent" in m.get("supportedGenerationMethods", []) \
+                    and "edit" not in n:
+                names.append(n)
+    except Exception as e:
+        log(f"Image model list failed: {str(e)[:150]}")
+    names.sort(key=lambda n: ("preview" in n, -len(re.findall(r"\d", n)), n))
+    _IMG_MODELS = names
+    log(f"Gemini image models: {names[:4]}")
+    return names
+
+
+def img_gemini(prompt, path):
+    key = os.getenv("GEMINI_API_KEY")
+    if not key or "gemini" in _IMG_DEAD:
+        return False
+    hdr = {"x-goog-api-key": key}
+    for model in gemini_image_models(hdr):
+        if model in _IMG_DEAD:
+            continue
+        body = {"contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseModalities": ["TEXT", "IMAGE"],
+                                     "imageConfig": {"aspectRatio": "1:1"}}}
+        for attempt in range(3):
+            try:
+                r = requests.post(f"{GEMINI_BASE}/models/{model}:generateContent", headers=hdr, json=body, timeout=120)
+                if r.status_code == 429:
+                    msg = r.text[:300]
+                    if "limit: 0" in msg or "free_tier" in msg and "limit: 0" in msg:
+                        log(f"Gemini image {model}: no free quota"); _IMG_DEAD.add(model); break
+                    log(f"Gemini image {model}: 429, waiting"); time.sleep(20 * (attempt + 1)); continue
+                if r.status_code in (400, 403, 404):
+                    log(f"Gemini image {model}: HTTP {r.status_code} {r.text[:160]}"); _IMG_DEAD.add(model); break
+                r.raise_for_status()
+                for part in r.json()["candidates"][0]["content"]["parts"]:
+                    if "inlineData" in part:
+                        import base64
+                        _save_img(base64.b64decode(part["inlineData"]["data"]), path)
+                        return True
+                log(f"Gemini image {model}: no image in response"); break
+            except Exception as e:
+                log(f"Gemini image {model}: {str(e)[:150]}"); time.sleep(5)
+    if all(m in _IMG_DEAD for m in (_IMG_MODELS or [])):
+        _IMG_DEAD.add("gemini")
+    return False
+
+
+def img_cloudflare(prompt, path):
+    acct, tok = os.getenv("CF_ACCOUNT_ID"), os.getenv("CF_API_TOKEN")
+    if not (acct and tok) or "cf" in _IMG_DEAD:
+        return False
+    url = f"https://api.cloudflare.com/client/v4/accounts/{acct}/ai/run/@cf/black-forest-labs/flux-1-schnell"
+    for attempt in range(3):
+        try:
+            r = requests.post(url, headers={"Authorization": f"Bearer {tok}"},
+                              json={"prompt": prompt[:2000], "steps": 6}, timeout=120)
+            if r.status_code in (401, 403):
+                log(f"Cloudflare: HTTP {r.status_code}"); _IMG_DEAD.add("cf"); return False
+            r.raise_for_status()
+            import base64
+            _save_img(base64.b64decode(r.json()["result"]["image"]), path)
+            return True
+        except Exception as e:
+            log(f"Cloudflare retry {attempt + 1}: {str(e)[:150]}"); time.sleep(5)
+    return False
+
+
+def img_pollinations(prompt, path, seed):
+    if "poll" in _IMG_DEAD:
+        return False
+    url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt) +
+           f"?width={IMG}&height={IMG}&nologo=true&seed={seed}&model=flux")
+    hdr = {"Authorization": f"Bearer {os.getenv('POLLINATIONS_KEY')}"} if os.getenv("POLLINATIONS_KEY") else {}
+    for attempt in range(2):
+        try:
+            r = requests.get(url, headers=hdr, timeout=120)
+            if r.status_code in (401, 402, 403):
+                log(f"Pollinations: HTTP {r.status_code}"); _IMG_DEAD.add("poll"); return False
+            if r.ok and r.headers.get("content-type", "").startswith("image"):
+                _save_img(r.content, path)
+                return True
+        except Exception as e:
+            log(f"Pollinations: {str(e)[:150]}")
+        time.sleep(16)
+    return False
+
+
 def make_image(prompt, path, seed, offline):
     if offline:
         return placeholder_image(prompt, path, seed)
-    full = f"{prompt}, {STYLE}"
-    url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(full) +
-           f"?width={IMG}&height={IMG}&nologo=true&seed={seed}&model=flux")
-    for attempt in range(4):
-        try:
-            r = requests.get(url, timeout=180)
-            if r.ok and r.headers.get("content-type", "").startswith("image"):
-                path.write_bytes(r.content)
-                Image.open(path).convert("RGB").resize((IMG, IMG)).save(path)
-                return
-            log(f"Image retry {attempt + 1}: HTTP {r.status_code}")
-        except Exception as e:
-            log(f"Image retry {attempt + 1}: {e}")
-        time.sleep(8 * (attempt + 1))
-    log("Image failed, using placeholder")
+    full = f"{prompt}. Style: {STYLE}"
+    for name, fn in (("gemini", lambda: img_gemini(full, path)),
+                     ("cloudflare", lambda: img_cloudflare(full, path)),
+                     ("pollinations", lambda: img_pollinations(full, path, seed))):
+        if fn():
+            log(f"Image via {name}")
+            return
+    log("All image providers failed, using placeholder")
     placeholder_image(prompt, path, seed)
 
 
