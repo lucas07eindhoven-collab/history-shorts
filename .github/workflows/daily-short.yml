@@ -1,4 +1,4 @@
-.github/workflows/daily-short.ymlname: daily-short
+name: daily-short
 
 on:
   schedule:
