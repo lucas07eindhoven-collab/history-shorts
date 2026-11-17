@@ -22,6 +22,11 @@ import time
 import urllib.parse
 
 import requests
+
+for _k in ("GEMINI_API_KEY", "GROQ_API_KEY", "CF_ACCOUNT_ID", "CF_API_TOKEN", "POLLINATIONS_KEY",
+           "YT_CLIENT_ID", "YT_CLIENT_SECRET", "YT_REFRESH_TOKEN"):
+    if os.environ.get(_k):
+        os.environ[_k] = os.environ[_k].strip()  # pasted secrets often carry a trailing newline/space
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = pathlib.Path(__file__).resolve().parent
