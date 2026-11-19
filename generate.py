@@ -67,23 +67,24 @@ LANG_NAME = {"nl": "Dutch (Nederlands)", "en": "English"}[LANG] if LANG in ("nl"
 SCRIPT_PROMPT = """You write VIRAL scripts for a faceless Shorts/TikTok/Reels channel: cartoon history for ADULTS.
 Goal: maximum retention. Viewers decide in 1 second whether to swipe.
 Tone: dry, savage, darkly funny, like a friend telling the most insane true story at a bar.
-Real history only - never invent facts, numbers or quotes. Mature themes OK (war, scandal, death,
+Real history only - never invent facts, numbers or quotes. Only use numbers that historians agree on;
+if a number or claim is disputed, soften it ("about", "reportedly", "some say"). Never exaggerate deaths or totals. Mature themes OK (war, scandal, death,
 politics, betrayal) but nothing graphic or gory.
 
 Topic: {topic}
 
 STRUCTURE (follow exactly):
-1. HOOK (scene 1): one short, shocking statement with a concrete detail or number. Start mid-action.
+1. HOOK (scene 1): max 10 words, shocking, with a concrete detail. Start mid-action.
    Good: "In 1672 the Dutch ate their own prime minister." Bad: "Did you know...", "Let me tell you...".
 2. CONTEXT (1-2 scenes): just enough setup, super fast, address the viewer as "you" where natural.
-3. ESCALATION (4-7 scenes): every scene makes it crazier. Put a re-hook around the middle
+3. ESCALATION (3-5 scenes): every scene makes it crazier. Put a re-hook around the middle
    ("But that's not even the weird part." / "And then it got worse.").
 4. PAYOFF (1 scene): the most absurd fact or twist.
 5. LOOP (last scene): a final line that flows naturally back into the hook, so a rewatch feels seamless.
 
 STYLE RULES:
 - Narration language: {lang}. Image prompts: English.
-- 10 to 13 scenes. ONE short sentence per scene, max 14 words. Total 130-160 words (~50 sec).
+- 7 to 9 scenes. ONE short sentence per scene, max 12 words. Total 70-95 words (~25-32 sec). Shorter is better.
 - Short punchy words. No filler, no dates unless they shock, no "like and subscribe".
 - Mark the 2-4 most shocking scenes with "punch": true.
 - Image prompt per scene: one funny, exaggerated cartoon moment with clear characters, emotion and
@@ -584,6 +585,20 @@ def build_video(script, workdir, offline, part=1):
 
 
 # ---------------------------------------------------------------- upload
+def publish_status():
+    """Schedule the Short for the next 18:00 Amsterdam time (prime scroll time), at least 1h from now."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Europe/Amsterdam")
+    hour = int(os.getenv("YT_PUBLISH_HOUR", "18"))
+    now = datetime.datetime.now(tz)
+    at = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if at < now + datetime.timedelta(hours=1):
+        at += datetime.timedelta(days=1)
+    log(f"Scheduled to publish at {at:%Y-%m-%d %H:%M} Amsterdam")
+    return {"privacyStatus": "private", "publishAt": at.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "selfDeclaredMadeForKids": False}
+
+
 def upload_youtube(video, script):
     cid, csec, rtok = (os.getenv(k) for k in
                        ("YT_CLIENT_ID", "YT_CLIENT_SECRET", "YT_REFRESH_TOKEN"))
@@ -608,8 +623,7 @@ def upload_youtube(video, script):
             "defaultLanguage": LANG,
             "defaultAudioLanguage": LANG,
         },
-        "status": {"privacyStatus": os.getenv("YT_PRIVACY", "public"),
-                   "selfDeclaredMadeForKids": False},
+        "status": publish_status(),
     }
     req = yt.videos().insert(part="snippet,status", body=body,
                              media_body=MediaFileUpload(str(video), chunksize=-1, resumable=True))
