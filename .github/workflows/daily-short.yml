@@ -2,7 +2,7 @@ name: daily-short
 
 on:
   schedule:
-    - cron: "37 15 * * *"   # every day 15:37 UTC (16:37 NL winter time)
+    - cron: "17 7 * * *"    # ~08:17 NL; GitHub often runs late, video is scheduled for 18:00 NL anyway
   workflow_dispatch:        # "Run workflow" button for manual runs
     inputs:
       topic:
