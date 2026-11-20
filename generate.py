@@ -259,14 +259,52 @@ def make_voice(text, path, offline):
         run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
              "-t", f"{secs:.2f}", "-q:a", "9", str(path)])
         return fake_timings(text, secs)
-    for attempt in range(3):
-        try:
-            words = asyncio.run(_tts(text, path))
-            return words or fake_timings(text, duration(path))
-        except Exception as e:
-            log(f"TTS retry {attempt + 1}: {e}")
-            time.sleep(3)
-    sys.exit("Edge TTS failed 3 times.")
+    if "edge" not in _TTS_DEAD:
+        for attempt in range(3):
+            try:
+                words = asyncio.run(_tts(text, path))
+                if path.exists() and path.stat().st_size > 1000:
+                    return words or fake_timings(text, duration(path))
+                raise RuntimeError("empty audio")
+            except Exception as e:
+                log(f"Edge TTS retry {attempt + 1}: {str(e)[:120]}")
+                time.sleep(5 * (attempt + 1))
+        log("Edge TTS unavailable -> switching to Piper for the rest of this run")
+        _TTS_DEAD.add("edge")
+    return piper_tts(text, path)
+
+
+_TTS_DEAD = set()
+_PIPER = None
+PIPER_VOICE = os.getenv("PIPER_VOICE", "nl_NL-ronnie-medium" if LANG == "nl" else "en_US-ryan-medium")
+
+
+def piper_tts(text, path):
+    """Free offline fallback voice (Piper). No word timings -> proportional captions."""
+    global _PIPER
+    import wave
+    if _PIPER is None:
+        from piper import PiperVoice
+        lang_dir = PIPER_VOICE.split("-")[0]           # nl_NL
+        family = lang_dir.split("_")[0]                  # nl
+        name, quality = PIPER_VOICE.split("-")[1:3]
+        base = (f"https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+                f"{family}/{lang_dir}/{name}/{quality}/{PIPER_VOICE}")
+        mdir = ROOT / ".piper"
+        mdir.mkdir(exist_ok=True)
+        for ext in (".onnx", ".onnx.json"):
+            f = mdir / (PIPER_VOICE + ext)
+            if not f.exists():
+                r = requests.get(base + ext, timeout=300)
+                r.raise_for_status()
+                f.write_bytes(r.content)
+        _PIPER = PiperVoice.load(str(mdir / (PIPER_VOICE + ".onnx")))
+        log(f"Piper voice loaded: {PIPER_VOICE}")
+    wav = path.with_suffix(".wav")
+    with wave.open(str(wav), "wb") as wf:
+        _PIPER.synthesize_wav(text, wf)
+    run(["ffmpeg", "-y", "-i", str(wav), "-filter:a", "atempo=1.08", "-q:a", "3", str(path)])
+    return fake_timings(text, duration(path))
 
 
 # ---------------------------------------------------------------- images
@@ -592,7 +630,10 @@ def publish_status():
     hour = int(os.getenv("YT_PUBLISH_HOUR", "18"))
     now = datetime.datetime.now(tz)
     at = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-    if at < now + datetime.timedelta(hours=1):
+    if now >= at and now.hour < 23:   # slot passed today (late/catch-up run) -> publish right away
+        log("Today's slot already passed -> publishing immediately")
+        return {"privacyStatus": "public", "selfDeclaredMadeForKids": False}
+    if at < now + datetime.timedelta(minutes=20):
         at += datetime.timedelta(days=1)
     log(f"Scheduled to publish at {at:%Y-%m-%d %H:%M} Amsterdam")
     return {"privacyStatus": "private", "publishAt": at.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
